@@ -1,6 +1,7 @@
 package pulsar
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -13,19 +14,44 @@ import (
 
 type Producer struct {
 	*PulsarClient
+	SequenceID uint64
+	Name string
+	Topic string
+	ID uint64
+}
+
+func (p *Producer) Open(requestID uint64) error {
+	err := p.CreateProducer(requestID)
+	if err != nil {
+		log.Error("Failed to create producer", err)
+
+		return err
+	}
+	log.Debug("Created producer")
+
+	success, err := p.ReceiveProducerSuccess()
+	if err != nil {
+		log.Error("Failed to receive producer", err)
+
+		return err
+	}
+	log.Debug("Recieved producer")
+	p.Name = success.GetProducerName()
+
+	return nil
 }
 
 func (p *Producer) CreateProducer(
-	topic string, producerId, requestId uint64,
+	requestId uint64,
 ) (err error) {
-	if err = p.SetLookupTopicConnection(topic, requestId, false); err != nil {
+	if err = p.SetLookupTopicConnection(p.Topic, requestId, false); err != nil {
 		err = errors.Wrap(err, "failed to set lookup topic connection")
 		return
 	}
 
 	producer := &pulsar_proto.CommandProducer{
-		Topic:      proto.String(topic),
-		ProducerId: proto.Uint64(producerId),
+		Topic:      proto.String(p.Topic),
+		ProducerId: proto.Uint64(p.ID),
 		RequestId:  proto.Uint64(requestId),
 	}
 
@@ -65,19 +91,20 @@ func (p *Producer) ReceiveProducerSuccess() (
 const defaultNumMessages = 1
 
 func (p *Producer) SendSend(
-	producerId, sequenceId uint64, producerName, payload string,
+	payload string,
 	keyValues KeyValues,
 ) (err error) {
+	sequenceID := atomic.AddUint64(&p.SequenceID, 1) - 1
 	send := &pulsar_proto.CommandSend{
-		ProducerId:  proto.Uint64(producerId),
-		SequenceId:  proto.Uint64(sequenceId),
+		ProducerId:  proto.Uint64(p.ID),
+		SequenceId:  proto.Uint64(sequenceID),
 		NumMessages: proto.Int32(defaultNumMessages),
 	}
 
 	now := time.Now().Unix()
 	meta := &pulsar_proto.MessageMetadata{
-		ProducerName: proto.String(producerName),
-		SequenceId:   proto.Uint64(sequenceId),
+		ProducerName: proto.String(p.Name),
+		SequenceId:   proto.Uint64(sequenceID),
 		PublishTime:  proto.Uint64(uint64(now)),
 		Properties:   keyValues.Convert(),
 	}
@@ -93,21 +120,21 @@ func (p *Producer) SendSend(
 }
 
 func (p *Producer) SendBatchSend(
-	producerId, sequenceId uint64,
-	producerName string, batchMessage command.BatchMessage,
+	batchMessage command.BatchMessage,
 	compression *pulsar_proto.CompressionType,
 ) (err error) {
+	sequenceID := atomic.AddUint64(&p.SequenceID, 1) - 1
 	numMessages := int32(len(batchMessage))
 	send := &pulsar_proto.CommandSend{
-		ProducerId:  proto.Uint64(producerId),
-		SequenceId:  proto.Uint64(sequenceId),
+		ProducerId:  proto.Uint64(p.ID),
+		SequenceId:  proto.Uint64(sequenceID),
 		NumMessages: proto.Int32(numMessages),
 	}
 
 	now := time.Now().Unix()
 	meta := &pulsar_proto.MessageMetadata{
-		ProducerName: proto.String(producerName),
-		SequenceId:   proto.Uint64(sequenceId),
+		ProducerName: proto.String(p.Name),
+		SequenceId:   proto.Uint64(sequenceID),
 		PublishTime:  proto.Uint64(uint64(now)),
 		Properties:   []*pulsar_proto.KeyValue{},
 		// batch mode
@@ -142,10 +169,10 @@ func (p *Producer) ReceiveSendReceipt() (
 }
 
 func (p *Producer) CloseProducer(
-	producerId, requestId uint64,
+	requestId uint64,
 ) (err error) {
 	close := &pulsar_proto.CommandCloseProducer{
-		ProducerId: proto.Uint64(producerId),
+		ProducerId: proto.Uint64(p.ID),
 		RequestId:  proto.Uint64(requestId),
 	}
 
@@ -158,7 +185,12 @@ func (p *Producer) CloseProducer(
 	return
 }
 
-func NewProducer(client *PulsarClient) (p *Producer) {
-	p = &Producer{client}
+func NewProducer(client *PulsarClient, producerID uint64, topic string) (p *Producer) {
+	p = &Producer{
+		PulsarClient: client,
+		SequenceID: 0,
+		ID: producerID,
+		Topic: topic,
+	}
 	return
 }
